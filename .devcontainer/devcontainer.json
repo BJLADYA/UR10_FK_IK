@@ -1,0 +1,44 @@
+{
+    "name": "ROS2 Jazzy Gazebo",
+    "privileged": true,
+    "remoteUser": "ros",
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    "workspaceFolder": "/home/ros/ws",
+    "workspaceMount": "source=${localWorkspaceFolder},target=/home/ros/ws,type=bind",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-vscode.cpptools-extension-pack",
+                "ms-python.python",
+                "twxs.cmake",
+                "Ranch-Hand-Robotics.rde-pack",
+                "Ranch-Hand-Robotics.rde-ros-2",
+                "Ranch-Hand-Robotics.urdf-editor"
+            ]
+        }
+    },
+    "containerEnv": {
+        "DISPLAY": "unix:0",
+        "ROS_AUTOMATIC_DISCOVERY_RANGE": "SYSTEM_DEFAULT",
+        "ROS_DOMAIN_ID": "42"
+    },
+
+    "runArgs": [
+        "--user=ros",
+        "--net=host",
+        "--pid=host",
+        "--ipc=host",
+        "--gpus", "all",
+        "-e", "NVIDIA_VISIBLE_DEVICES=all",
+        "-e", "NVIDIA_DRIVER_CAPABILITIES=graphics,utility,compute",
+        "-e", "DISPLAY=${env:DISPLAY}",
+        "-e", "QT_X11_NO_MITSHM=1"
+    ],
+    "mounts": [
+        "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind,consistency=cached"
+        //"source=/dev/dri,target=/dev/dri,type=bind,consistency=cached"
+    ],
+    "postCreateCommand": "sudo apt-get update && rosdep update && rosdep install --from-paths src --ignore-src -y && sudo chown -R $(whoami) /home/ros/ws/"
+}
