@@ -5,7 +5,6 @@ from sensor_msgs.msg import JointState
 
 import numpy as np
 from math import sin, cos, acos, atan2, sqrt, pi
-from scipy.optimize import least_squares
 
 
 # DH-параметры
@@ -19,16 +18,135 @@ DH = np.array([
     [ 0.0,    0.0,    0.0922,   0.0],   # joint 6 (TCP)
 ])
 
+
+a2 = DH[1, 0]   # -0.612
+a3 = DH[2, 0]   # -0.5723
+d1 = DH[0, 2]   # 0.1273
+d4 = DH[3, 2]   # 0.1639
+d5 = DH[4, 2]   # 0.1157
+d6 = DH[5, 2]   # 0.0922
+
+
 def dh_transform(a, alpha, d, theta):
-    """
-    Однородная матрица преобразования по DH-параметрам
-    """
+    """Стандартная DH-матрица 4x4"""
+    ct, st = cos(theta), sin(theta)
+    ca, sa = cos(alpha), sin(alpha)
     return np.array([
-        [cos(theta), -sin(theta)*cos(alpha),  sin(theta)*sin(alpha), a*cos(theta)],
-        [sin(theta),  cos(theta)*cos(alpha), -cos(theta)*sin(alpha), a*sin(theta)],
-        [0.0,         sin(alpha),             cos(alpha),            d],
-        [0.0,         0.0,                     0.0,                  1.0]
+        [ct,          -st*ca,          st*sa,         a*ct],
+        [st,           ct*ca,         -ct*sa,         a*st],
+        [0.0,          sa,             ca,            d],
+        [0.0,          0.0,            0.0,           1.0]
     ])
+
+def dh_inverse_transform(a, alpha, d, theta):
+    """Обратная DH-матрица """
+    ct, st = cos(theta), sin(theta)
+    ca, sa = cos(alpha), sin(alpha)
+    return np.array([
+        [ct,           st,          0.0,        -a],
+        [-st*ca,        ct*ca,       sa,     -d*sa],
+        [st*sa,        -ct*sa,       ca,     -d*ca],
+        [0.0,          0.0,         0.0,       1.0]
+    ])
+
+def rpy_to_rotation_matrix(roll, pitch, yaw):
+    """RPY => матрица вращения (Z-Y-X)"""
+    cr, sr = cos(roll), sin(roll)
+    cp, sp = cos(pitch), sin(pitch)
+    cy, sy = cos(yaw), sin(yaw)
+    Rx = np.array([[1,   0,  0], [0,  cr, -sr], [0,   sr, cr]])
+    Ry = np.array([[cp,  0, sp], [0,  1,    0], [-sp, 0,  cp]])
+    Rz = np.array([[cy, -sy, 0], [sy, cy,   0], [0,   0,   1]])
+    return Rz @ Ry @ Rx
+
+def analytical_inverse_kinematics(target_pos, rpy):
+    """
+    Аналитическая обратная кинематика UR10 (одно фиксированное решение)
+    Использует последовательное умножение на инверсные матрицы
+    """
+    # Целевая матрица T06
+    R06 = rpy_to_rotation_matrix(rpy[0], rpy[1], rpy[2])
+    T06 = np.eye(4)
+    T06[:3, :3] = R06
+    T06[:3, 3] = target_pos
+
+    # === 1. Находим theta1 (изолируем T16 = T01^{-1} @ T06) ===
+    # T01^{-1} зависит от theta1, поэтому аналитически:
+    p05 = target_pos + d6 * R06[:, 2] # центр frame 5
+
+    r = sqrt(p05[0]**2 + p05[1]**2)
+    if r < abs(d4):
+        print('theta1 недостижима')
+        return None
+
+    phi = atan2(p05[1], p05[0])
+    psi = acos(d4 / r)
+    # Две возможные theta1
+    theta1_left  = phi + psi + pi/2
+    theta1_right = phi - psi + pi/2
+    theta1 = theta1_right  # выбираем "плечо вперёд" (right/forward)
+
+    # === 2. Находим theta5 ===
+    proj = p05[0]*sin(theta1) - p05[1]*cos(theta1) - d4  # проекция на ось Y1
+    if abs(proj) > d6:
+        print('theta5 недостижима')
+        return None
+    cos_theta5 = proj / d6
+    cos_theta5 = np.clip(cos_theta5, -1.0, 1.0)
+    theta5_plus = acos(cos_theta5)      # non-flip
+    theta5_minus = -acos(cos_theta5)    # flip
+    theta5 = theta5_plus  # выбираем non-flip
+
+    if abs(sin(theta5)) < 1e-8:
+        print('theta5 сингулярность')
+        return None  # сингулярность запястья
+
+    # === 3. Находим theta6 ===
+    s1, c1 = sin(theta1), cos(theta1)
+    # Проекции осей X и Y целевой ориентации на плоскость XY frame1
+    num1 = (-R06[1,0]*s1 + R06[1,1]*c1) / sin(theta5)
+    num2 = ( R06[0,0]*s1 - R06[0,1]*c1) / sin(theta5)
+    if sqrt(num1**2 + num2**2) < 1e-4:
+        theta6 = 0.0
+    else:
+        theta6 = atan2(num1, num2)
+
+    # === 4. Решаем позиционную задачу для theta2, theta3, theta4 ===
+    # Вычисляем T14_target = T01^{-1} @ T06 @ (T56 @ T65)^{-1}
+    T01 = dh_transform(DH[0,0], DH[0,1], DH[0,2], theta1)
+    T45 = dh_transform(DH[4,0], DH[4,1], DH[4,2], theta5)
+    T56 = dh_transform(DH[5,0], DH[5,1], DH[5,2], theta6)
+    T46 = T45 @ T56
+    T04_target = np.linalg.inv(T01) @ T06 @ np.linalg.inv(T46)
+    # Теперь T04_target — это желаемая трансформация для frame4
+    px, py, pz = T04_target[:3, 3]
+    pz += p05[2]
+
+    # Геометрическое решение для theta3 (elbow up)
+    dist_sq = px**2 + py**2 + pz**2
+    cos_theta3 = (dist_sq - a2**2 - a3**2) / (2 * abs(a2) * abs(a3))
+    if abs(cos_theta3) > 1.0:
+        print('theta3 недостижима')
+        return None
+    theta3 = -acos(cos_theta3)  # положительный → elbow up
+
+    # theta2
+    alpha = atan2(pz, sqrt(px**2 + py**2))
+    beta = atan2(a3 * sin(theta3), a2 + a3 * cos(theta3))
+    theta2 = alpha - beta
+
+    # theta4 из ориентации
+    T02 = T01 @ dh_transform(DH[1,0], DH[1,1], DH[1,2], theta2)
+    T03 = T02 @ dh_transform(DH[2,0], DH[2,1], DH[2,2], theta3)
+    R03 = T03[:3, :3]
+    R34_target = R03.T @ T04_target[:3, :3]
+    # Для alpha=pi/2 в J4: theta4 = atan2(R34[2,1], R34[2,2])
+    theta4 = atan2(R34_target[1,0], R34_target[0,0]) + pi/2
+
+    joints = np.array([theta1, theta2, theta3, theta4, theta5, theta6])
+    joints = (joints + pi) % (2*pi) - pi  # нормализация в [-pi, pi]
+
+    return joints
 
 
 def forward_kinematics(joints):
@@ -39,91 +157,6 @@ def forward_kinematics(joints):
         T = T @ dh_transform(DH[i, 0], DH[i, 1], DH[i, 2], theta)
         T_list.append(T.copy())
     return T_list
-
-
-def jacobian(q):
-    """Якобиан для численного IK"""
-    TF_lists = forward_kinematics(q)
-    z = [np.array([0, 0, 1])]  # z0 в базе
-    o = [np.array([0, 0, 0])]  # o0
-    for i in range(6):
-        T = TF_lists[i]
-        z.append(T[:3, 2])  # ось Zi
-        o.append(T[:3, 3])  # центр сустава i+1
-    
-    J = np.zeros((6, 6))
-    for i in range(6):
-        J[0:3, i] = np.cross(z[i], o[-1] - o[i])  # линейная часть
-        J[3:6, i] = z[i]                          # угловая часть
-    return J
-
-
-def numerical_inverse_kinematics(target_pos, target_rpy, q_init=None, max_iter=500, tol=1e-3):
-    """
-    Полная численная IK (позиция + ориентация)
-    """
-    if q_init is None:
-        q_init = np.array([0.0, -pi/2, 0.0, -pi/2, 0.0, 0.0])  # home позиция
-    
-    # Целевая матрица T06
-    target_R = rpy_to_rotation_matrix(target_rpy[0], target_rpy[1], target_rpy[2])
-    target_T = np.eye(4)
-    target_T[:3, :3] = target_R
-    target_T[:3, 3] = target_pos
-    
-    def error_function(q):
-        TF = forward_kinematics(q)[-1]  # T06
-        pos_err = target_T[:3, 3] - TF[:3, 3]
-        
-        # Ошибка ориентации (axis-angle в base frame)
-        R_err = target_T[:3, :3] @ TF[:3, :3].T  # R_target * R_current^T
-        theta = acos(np.clip((np.trace(R_err) - 1) / 2, -1, 1))
-        if theta < 1e-6:
-            rot_err = np.zeros(3)
-        else:
-            multi = theta / (2 * sin(theta))
-            rot_err = multi * np.array([
-                R_err[2, 1] - R_err[1, 2],
-                R_err[0, 2] - R_err[2, 0],
-                R_err[1, 0] - R_err[0, 1]
-            ])
-        
-        return np.concatenate((pos_err * 10, rot_err))  # вес позиции выше
-    
-    q = q_init.copy()
-    for i in range(max_iter):
-        error = error_function(q)
-        error_norm = np.linalg.norm(error)
-        
-        if error_norm < tol:
-            print(f"IK сошлось за {i} итераций, ошибка: {error_norm:.6f}")
-            q = (q + pi) % (2 * pi) - pi  # нормализация
-            return q
-        
-        J = jacobian(q)
-        # Полный 6x6 якобиан
-        try:
-            dq = 0.1 * np.linalg.pinv(J, rcond=1e-3) @ error  # уменьшенный шаг для стабильности
-        except np.linalg.LinAlgError:
-            print("Сингулярность якобиана")
-            return None
-        
-        q += dq
-        q = np.clip(q, -pi*2, pi*2)  # ограничение углов
-    
-    print(f"IK не сошлось, финальная ошибка: {error_norm:.6f}")
-    return None
-
-
-def rpy_to_rotation_matrix(roll, pitch, yaw):
-    """RPY в матрицу ротации"""
-    cr, sr = cos(roll), sin(roll)
-    cp, sp = cos(pitch), sin(pitch)
-    cy, sy = cos(yaw), sin(yaw)
-    Rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
-    Ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
-    Rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
-    return Rz @ Ry @ Rx
 
 
 def are_points_collinear(p1, p2, p3, eps=1e-6):
@@ -257,9 +290,9 @@ class UR10KinematicsNode(Node):
 
     def demo(self):
         # Три произвольные точки
-        p1 = np.array([0.6, 0.0, 0.3])
-        p3 = np.array([0.5, -0.1, 0.3])
-        p2 = np.array([0.4, 0.0, 0.3])
+        p1 = np.array([0.6, 0.0, 0.5])
+        p3 = np.array([0.5, -0.1, 0.2])
+        p2 = np.array([0.4, 0.0, 0.5])
 
         if are_points_collinear(p1, p2, p3):
             self.get_logger().error('Точки коллинеарны')
@@ -271,20 +304,15 @@ class UR10KinematicsNode(Node):
         joint_points = []
         rpy = np.array([pi, 0.0, 0.0])  # фиксированная ориентация
         
-        # Начальное приближение для IK (важно для конфигурации!)
-        q_init = np.array([0.0, -pi/2, 0.0, -pi/2, 0.0, 0.0])  # home
-        
         success_count = 0
         for i, p in enumerate(traj_points):         
-            joints = numerical_inverse_kinematics(p, rpy, q_init)
+            joints = analytical_inverse_kinematics(p, rpy)
             
             if joints is not None:
                 joint_points.append(joints)
                 success_count += 1
-                # Обновляем начальное приближение для следующей точки
-                q_init = joints.copy()
             else:
-                self.get_logger().error(f'Точка {i+1} вне рабочей зоны или не сошлось IK')
+                self.get_logger().error(f'Точка {i+1} недостижима')
                 # return
         
         if success_count == 0:
@@ -315,7 +343,7 @@ class UR10KinematicsNode(Node):
         self.get_logger().info(f'Добавлена стартовая точка. Всего точек: {len(traj_points)}')
 
         tcp_speed = 0.1
-        self.publish_trajectory(traj_points[:success_count + 1], joint_points, tcp_speed)
+        self.publish_trajectory(traj_points[:success_count+1], joint_points, tcp_speed)
 
 
     def publish_trajectory(self, traj_points, joint_points, tcp_speed):
