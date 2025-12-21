@@ -2,9 +2,9 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>manipulator_task</name>
-  <version>0.0.0</version>
-  <description>TODO: Package description</description>
-  <maintainer email="vl@dislav-medvedev.ru">ros</maintainer>
+  <version>0.0.1</version>
+  <description>Homework #2</description>
+  <maintainer email="vl@dislav-medvedev.ru">Vladislav Medvedev</maintainer>
   <license>TODO: License declaration</license>
 
   <depend>rclpy</depend>
@@ -13,6 +13,21 @@
   <depend>numpy</depend>
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
+
+  <depend>ros-gz</depend>
+  <depend>ros-gz-sim</depend>
+  <depend>ros-gz-bridge</depend>
+  <depend>gz-ros2-control</depend>
+  <depend>ur-description</depend>
+  <depend>xacro</depend>
+  <depend>joint-state-publisher-gui</depend>
+  <depend>robot-state-publisher</depend>
+  <depend>controller-manager</depend>
+  <depend>ros2-controllers</depend>
+  <depend>ur-controllers</depend>
+  <depend>ur-simulation-gz</depend>
+  <depend>ur-moveit-config</depend>
+  <depend>ros2-control</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
